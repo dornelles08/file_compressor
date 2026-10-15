@@ -197,6 +197,9 @@ class MainWindow(QWidget):
         table.setWordWrap(False)
         table.verticalHeader().setDefaultSectionSize(40)
         table.doubleClicked.connect(self._show_details)
+        table.selectionModel().selectionChanged.connect(
+            lambda *_: self._update_state()
+        )
 
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -489,7 +492,8 @@ class MainWindow(QWidget):
         has_files = self.table.rowCount() > 0
         self.btn_start.setEnabled(has_files and not (self._worker and self._worker.isRunning()))
         self.btn_clear.setEnabled(has_files)
-        self.btn_remove.setEnabled(has_files and not (self._worker and self._worker.isRunning()))
+        sel = self.table.selectionModel()
+        self.btn_remove.setEnabled(has_files and not (self._worker and self._worker.isRunning()) and sel and sel.hasSelection())
         self.btn_open.setEnabled(any(
             r.status is Status.DONE for r in self._reports.values()
         ) or self._out_dir is not None)
