@@ -82,6 +82,22 @@ brew install ffmpeg ghostscript
 
 Linux/Windows: consulte a documentação oficial.
 
+## Desempenho por hardware (vídeo)
+
+O compressor detecta automaticamente aceleradores de hardware para codificação H.264:
+
+| Plataforma | Verificação | Codificador usado | Observações |
+|---|---|---|---|
+| Linux | NVIDIA (`h264_nvenc`) | `h264_nvenc` | Usa `-hwaccel auto`, CRF via `-cq`. Fallback p/ `libx264` caso falhe. |
+| Linux | Intel QuickSync (`h264_qsv`) | `h264_qsv` | Usa `-global_quality`. Fallback automático. |
+| Linux | AMD (VAAPI/AMF) | `h264_vaapi` ou `h264_amf` | Prioriza VAAPI quando disponível. Fallback automático. |
+| macOS | VideoToolbox | `h264_videotoolbox` | Usa `-q:v` com CRF. Fallback automático para `libx264`. |
+| Outros | — | `libx264` (preset `slow`, CRF padrão) | Mantém qualidade/compatibilidade com WhatsApp (MP4 H.264 yuv420p). |
+
+- Saída sempre em MP4 H.264, pixel format `yuv420p` para máxima compatibilidade.
+- Aceleração priorizada quando disponível; em caso de falha, há **fallback automático** para `libx264` preservando presets e CRF.
+- Áudio mantém AAC (não priorizamos hw accel para áudio por raridade/compatibilidade neste caso).
+
 ## Segurança & integridade
 
 - **Nunca toca no original** — saída em pasta separada (`compressados/` ou escolhida)

@@ -1,4 +1,4 @@
-"""Vídeo: reencode H.264 (x264) via ffmpeg.
+"""Vídeo: reencode H.264 com aceleração por hardware quando disponível.
 
 - Preset QUALITY: CRF 18 (visualmente sem perda), áudio AAC 160 kbps
 - Preset MAX:     CRF 26, áudio AAC 128 kbps
@@ -11,7 +11,7 @@ from compressor.strategies.base import (
 )
 from compressor.utils import (
     CompressionError, Skip, ffprobe, probe_duration, run_ffmpeg, verify_media,
-    which,
+    which, detect_hwaccel,
 )
 from pathlib import Path
 
@@ -25,10 +25,12 @@ def plan(info, preset: Preset) -> str:
     meta = info.meta.get("_ffprobe") or {}
     streams = meta.get("streams") or []
     if not any(s.get("codec_type") == "video" for s in streams):
-        # Não deveria chegar aqui (categoria áudio), mas garante.
         raise Skip("O arquivo não contém fluxo de vídeo.")
     crf = CRF[preset]
-    return f"Reencode H.264 (CRF {crf}) + áudio AAC — resolução mantida"
+    hw = detect_hwaccel()
+    if hw["encoder"] != "libx264":
+        return f"Reencode H.264 ({hw['encoder']}, hw accel) CRF {crf} + áudio AAC — resolução mantida"
+    return f"Reencode H.264 (libx264) CRF {crf} + áudio AAC — resolução mantida"
 
 
 def run(info, out_dir: Path, preset: Preset, progress: ProgressFn) -> StrategyResult:
@@ -45,28 +47,73 @@ def run(info, out_dir: Path, preset: Preset, progress: ProgressFn) -> StrategyRe
     crf, abr = CRF[preset], ABITRATE[preset]
 
     dst = unique_path(out_dir, f"{info.path.stem}.mp4")
+    hw = detect_hwaccel()
+    encoder = hw["encoder"]
+    enc_preset = hw["encoder_preset"]
+
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-nostdin",
+    ]
+    if hw.get("extra"):
+        cmd.extend(hw["extra"])
+    cmd.extend([
         "-i", str(info.path),
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "slow", "-crf", crf,
+    ])
+    cmd.extend(["-c:v", encoder])
+    if encoder == "libx264":
+        cmd.extend(["-preset", enc_preset, "-crf", crf])
+    elif encoder == "h264_nvenc":
+        # NVENC: use -cq (quality) similar to CRF
+        cmd.extend(["-preset", enc_preset, "-cq", crf, "-rc", "vbr", "-b:v", "0"])
+    elif encoder == "h264_videotoolbox":
+        cmd.extend(["-q:v", crf])
+    elif encoder == "h264_qsv":
+        cmd.extend(["-preset", enc_preset, "-global_quality", crf])
+    elif encoder in ("h264_amf", "h264_vaapi"):
+        cmd.extend(["-qp", crf])
+    else:
+        cmd.extend(["-preset", "slow", "-crf", crf])
+    cmd.extend([
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", abr,
         "-movflags", "+faststart",
         "-progress", "pipe:1", "-nostats",
         str(dst),
-    ]
+    ])
 
     duration = info.duration or probe_duration(meta)
     progress(0, "Preparando vídeo…")
     with cleanup_on_failure(dst):
-        run_ffmpeg(cmd, duration, progress, stage="Comprimindo vídeo")
-        verify_media(dst)
+        try:
+            run_ffmpeg(cmd, duration, progress, stage="Comprimindo vídeo")
+            verify_media(dst)
+        except Exception:
+            # Fallback to libx264 if hardware accel fails
+            cmd_fb = [
+                "ffmpeg", "-y", "-hide_banner", "-nostdin",
+                "-i", str(info.path),
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "slow", "-crf", crf,
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", abr,
+                "-movflags", "+faststart",
+                "-progress", "pipe:1", "-nostats",
+                str(dst),
+            ]
+            run_ffmpeg(cmd_fb, duration, progress, stage="Comprimindo vídeo (fallback)")
+            verify_media(dst)
+            encoder = "libx264 (fallback)"
+            enc_preset = "slow"
 
-    notes = [
-        f"H.264 (x264) CRF {crf}, preset slow",
-        f"Áudio AAC {int(abr.rstrip('k'))} kbps",
-    ]
+    notes_list = list(notes)
+    if encoder == "libx264 (fallback)":
+        notes_list[0] = f"H.264 (libx264) CRF {crf}, preset slow [fallback automático após falha de hw accel]"
+    elif encoder == "libx264":
+        notes_list[0] = f"H.264 (libx264) CRF {crf}, preset slow"
+    else:
+        notes_list[0] = f"H.264 ({encoder}) CRF {crf}, preset {enc_preset} [hw accel]"
+    notes = notes_list
     if w and h:
         notes.append(f"Resolução {w}×{h} mantida")
     if src_ext not in (".mp4", ".m4v"):

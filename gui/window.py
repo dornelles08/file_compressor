@@ -21,7 +21,7 @@ from gui.widgets import (
 )
 from gui.worker import CompressionWorker
 
-COLUMNS = ["ARQUIVO", "TIPO", "ORIGINAL", "PROGRESSO", "STATUS", "RESULTADO", "ECONOMIA"]
+COLUMNS = ["ARQUIVO", "TIPO", "ORIGINAL", "PROGRESSO", "STATUS", "RESULTADO", "ECONOMIA", "TEMPO"]
 WHATSAPP_TIP = ("Dica: no WhatsApp, envie o arquivo como Documento "
                 "(clipe 📎) para evitar nova compressão do aplicativo.")
 
@@ -40,6 +40,8 @@ class MainWindow(QWidget):
         self._worker: CompressionWorker | None = None
         self._reports: dict[int, Report] = {}
         self._paths: list[Path] = []
+        self._items: list[Path] = []  # all paths in order
+        self._finished: set[int] = set()  # finished row indices
 
         self._build_ui()
 
@@ -166,13 +168,16 @@ class MainWindow(QWidget):
         self.btn_clear = QPushButton("Limpar")
         self.btn_clear.setObjectName("Ghost")
         self.btn_clear.clicked.connect(self._clear)
+        self.btn_remove = QPushButton("Remover")
+        self.btn_remove.setObjectName("Ghost")
+        self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_start = QPushButton("Comprimir")
         self.btn_start.setObjectName("Primary")
         self.btn_start.clicked.connect(self._start)
         self.btn_cancel = QPushButton("Cancelar")
         self.btn_cancel.setObjectName("Danger")
         self.btn_cancel.clicked.connect(self._cancel)
-        for b in (self.btn_add, self.btn_add_folder, self.btn_clear):
+        for b in (self.btn_add, self.btn_add_folder, self.btn_clear, self.btn_remove):
             b.setCursor(Qt.PointingHandCursor)
             actions.addWidget(b)
         actions.addWidget(self.btn_start)
@@ -187,7 +192,7 @@ class MainWindow(QWidget):
         table.setShowGrid(False)
         table.setAlternatingRowColors(False)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setWordWrap(False)
         table.verticalHeader().setDefaultSectionSize(40)
@@ -195,7 +200,7 @@ class MainWindow(QWidget):
 
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for i, w in ((1, 150), (2, 100), (3, 150), (4, 150), (5, 100), (6, 90)):
+        for i, w in ((1, 150), (2, 100), (3, 150), (4, 150), (5, 100), (6, 90), (7, 90)):
             header.setSectionResizeMode(i, QHeaderView.Fixed)
             table.setColumnWidth(i, w)
         return table
@@ -236,6 +241,10 @@ class MainWindow(QWidget):
         lay.addWidget(self.lbl_saved)
 
         lay.addSpacing(16)
+        self.lbl_total_time = QLabel("Tempo total: —")
+        self.lbl_total_time.setObjectName("Hint")
+        lay.addWidget(self.lbl_total_time)
+        lay.addSpacing(8)
         self.btn_open = QPushButton("Abrir pasta")
         self.btn_open.setObjectName("Ghost")
         self.btn_open.clicked.connect(self._open_out_dir)
@@ -280,12 +289,12 @@ class MainWindow(QWidget):
             return
 
         existing = {str(p) for p in self._paths}
-        added = 0
         for path in found:
             if str(path) in existing:
                 continue
             existing.add(str(path))
             self._paths.append(path)
+            self._items.append(path)
 
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -314,7 +323,7 @@ class MainWindow(QWidget):
             status_item.setForeground(color_for(Status.PENDING))
             self.table.setItem(row, 4, status_item)
 
-            for col in (5, 6):
+            for col in (5, 6, 7):
                 item = QTableWidgetItem("—")
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(row, col, item)
@@ -388,6 +397,7 @@ class MainWindow(QWidget):
 
     def _on_finished(self, row: int, report: Report) -> None:
         self._reports[row] = report
+        self._finished.add(row)
 
         cell = self.table.cellWidget(row, 3)
         if isinstance(cell, ProgressCell):
@@ -415,6 +425,18 @@ class MainWindow(QWidget):
             if report.status is Status.DONE:
                 savings_item.setForeground(color_for(Status.DONE))
 
+        time_item = self.table.item(row, 7)
+        if time_item:
+            if report.elapsed > 0:
+                if report.elapsed < 60:
+                    time_item.setText(f"{report.elapsed:.1f}s")
+                else:
+                    m = int(report.elapsed // 60)
+                    s = int(report.elapsed % 60)
+                    time_item.setText(f"{m:02d}:{s:02d}")
+            else:
+                time_item.setText("—")
+
         self._update_summary()
 
     def _on_queue_finished(self) -> None:
@@ -428,18 +450,21 @@ class MainWindow(QWidget):
         self.btn_cancel.setEnabled(running)
         self.btn_cancel.setText("Cancelar")
         for b in (self.btn_add, self.btn_add_folder, self.btn_clear,
-                  self.btn_quality, self.btn_max, self.btn_dest):
+                  self.btn_remove, self.btn_quality, self.btn_max, self.btn_dest):
             b.setEnabled(not running)
 
     # --------------------------------------------------------------- resumo
     def _update_summary(self) -> None:
         src_total = dst_total = 0
         done = 0
+        total_time = 0.0
         for report in self._reports.values():
             if report.status is Status.DONE:
                 src_total += report.src_size
                 dst_total += report.dst_size
                 done += 1
+            if report.elapsed > 0:
+                total_time += report.elapsed
         if done and src_total:
             self.lbl_src.setText(human_size(src_total))
             self.lbl_dst.setText(human_size(dst_total))
@@ -450,11 +475,21 @@ class MainWindow(QWidget):
             self.lbl_src.setText("—")
             self.lbl_dst.setText("—")
             self.lbl_saved.setText("")
+        if total_time > 0:
+            if total_time < 60:
+                self.lbl_total_time.setText(f"Tempo total: {total_time:.1f}s")
+            else:
+                m = int(total_time // 60)
+                s = int(total_time % 60)
+                self.lbl_total_time.setText(f"Tempo total: {m:02d}:{s:02d}")
+        else:
+            self.lbl_total_time.setText("Tempo total: —")
 
     def _update_state(self) -> None:
         has_files = self.table.rowCount() > 0
         self.btn_start.setEnabled(has_files and not (self._worker and self._worker.isRunning()))
         self.btn_clear.setEnabled(has_files)
+        self.btn_remove.setEnabled(has_files and not (self._worker and self._worker.isRunning()))
         self.btn_open.setEnabled(any(
             r.status is Status.DONE for r in self._reports.values()
         ) or self._out_dir is not None)
@@ -466,6 +501,66 @@ class MainWindow(QWidget):
         self.table.setRowCount(0)
         self._paths.clear()
         self._reports.clear()
+        self._finished.clear()
+        self._items.clear()
+        self._update_summary()
+        self._update_state()
+
+    def _remove_selected(self) -> None:
+        if self._worker and self._worker.isRunning():
+            return
+        selected = self.table.selectionModel().selectedRows()
+        if not selected:
+            return
+        # Collect which paths to remove (pending only)
+        rows = sorted((idx.row() for idx in selected), reverse=True)
+        to_remove_paths = set()
+        for row in rows:
+            if row in self._reports:
+                continue  # não afeta itens já finalizados
+            if row < len(self._paths):
+                to_remove_paths.add(str(self._paths[row]))
+        if not to_remove_paths:
+            return
+        # Rebuild everything preserving finished items
+        old_paths = list(self._paths)
+        old_reports = dict(self._reports)
+        self.table.setRowCount(0)
+        self._paths.clear()
+        self._reports.clear()
+        self._finished.clear()
+        # Rebuild in order, skipping removed pending paths
+        for i, path in enumerate(old_paths):
+            if i not in old_reports and str(path) in to_remove_paths:
+                continue  # removed pending
+            self._paths.append(path)
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            name = QTableWidgetItem(path.name)
+            name.setToolTip(str(path))
+            self.table.setItem(row, 0, name)
+            try:
+                info = detect(path)
+                type_text = info.type_label
+                size_text = human_size(info.size)
+            except OSError:
+                type_text, size_text = "—", "—"
+            type_item = QTableWidgetItem(type_text)
+            type_item.setForeground(color_for(Status.PENDING))
+            self.table.setItem(row, 1, type_item)
+            size_item = QTableWidgetItem(size_text)
+            size_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(row, 2, size_item)
+            self.table.setCellWidget(row, 3, ProgressCell())
+            status_item = QTableWidgetItem("Na fila")
+            status_item.setForeground(color_for(Status.PENDING))
+            self.table.setItem(row, 4, status_item)
+            for col in (5, 6, 7):
+                item = QTableWidgetItem("—")
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.table.setItem(row, col, item)
+            if i in old_reports:
+                self._on_finished(row, old_reports[i])
         self._update_summary()
         self._update_state()
 
@@ -477,7 +572,7 @@ class MainWindow(QWidget):
                     target = report.dst.parent
                     break
         if target is None and self._paths:
-            target = default_out_dir(self._paths[0])
+            target = default_out_dir(self._paths[0]) if self._paths else None
         if target and target.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
         else:
@@ -490,6 +585,13 @@ class MainWindow(QWidget):
         if report is None:
             return
         DetailsDialog(report, self).exec()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._remove_selected()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._worker and self._worker.isRunning():

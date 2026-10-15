@@ -44,6 +44,89 @@ def which(tool: str) -> str | None:
     return shutil.which(tool)
 
 
+def detect_hwaccel() -> dict:
+    """Detecta aceleração de hardware disponível para codificação H.264."""
+    info = {
+        "platform": None,
+        "nvidia": False,
+        "amd": False,
+        "intel": False,
+        "videotoolbox": False,
+        "encoder": "libx264",  # fallback
+        "encoder_preset": "slow",
+        "extra": [],
+        "hwaccel": None,
+    }
+    import platform
+    import subprocess
+    import os
+
+    info["platform"] = platform.system().lower()
+
+    # Check ffmpeg encoders
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=5)
+        encoders = out.stdout.lower()
+    except Exception:
+        encoders = ""
+
+    # NVIDIA
+    if "h264_nvenc" in encoders:
+        info["nvidia"] = True
+
+    # AMD
+    if any(k in encoders for k in ("h264_amf", "h264_vaapi", "hevc_amf")):
+        info["amd"] = True
+        if "h264_vaapi" in encoders:
+            info["vaapi"] = True
+
+    # Intel
+    if "h264_qsv" in encoders:
+        info["intel"] = True
+
+    # macOS VideoToolbox
+    if info["platform"] == "darwin":
+        if "h264_videotoolbox" in encoders:
+            info["videotoolbox"] = True
+
+    # Select best encoder
+    if info["nvidia"] and "h264_nvenc" in encoders:
+        info["encoder"] = "h264_nvenc"
+        info["encoder_preset"] = "p5"  # conservative default for quality/compat
+        info["hwaccel"] = "cuda"
+        info["extra"] = ["-hwaccel", "auto"]
+    elif info["platform"] == "darwin" and info["videotoolbox"]:
+        info["encoder"] = "h264_videotoolbox"
+        info["encoder_preset"] = "medium"
+        info["hwaccel"] = "videotoolbox"
+        info["extra"] = []
+    elif info["intel"] and "h264_qsv" in encoders:
+        info["encoder"] = "h264_qsv"
+        info["encoder_preset"] = "slow"
+        info["hwaccel"] = "qsv"
+        info["extra"] = ["-hwaccel", "auto"]
+    elif info["amd"]:
+        # Prefer VAAPI if available, else AMF? Depends on setup - but common
+        if "h264_vaapi" in encoders:
+            info["encoder"] = "h264_vaapi"
+            info["encoder_preset"] = "slow"
+            info["hwaccel"] = "vaapi"
+            info["extra"] = ["-hwaccel", "auto"]
+        elif "h264_amf" in encoders:
+            info["encoder"] = "h264_amf"
+            info["encoder_preset"] = "medium"
+            info["hwaccel"] = "amf"
+            info["extra"] = []
+    else:
+        info["encoder"] = "libx264"
+        info["encoder_preset"] = "slow"
+        info["hwaccel"] = None
+        info["extra"] = []
+
+    return info
+
+
 def ffprobe(path: Path) -> dict:
     """Retorna metadados JSON de mídia via ffprobe."""
     if not which("ffprobe"):
