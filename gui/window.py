@@ -493,10 +493,25 @@ class MainWindow(QWidget):
         self.btn_start.setEnabled(has_files and not (self._worker and self._worker.isRunning()))
         self.btn_clear.setEnabled(has_files)
         sel = self.table.selectionModel()
-        self.btn_remove.setEnabled(has_files and not (self._worker and self._worker.isRunning()) and sel and sel.hasSelection())
-        self.btn_open.setEnabled(any(
-            r.status is Status.DONE for r in self._reports.values()
-        ) or self._out_dir is not None)
+        has_selection = bool(sel and sel.hasSelection())
+        self.btn_remove.setEnabled(
+            has_files
+            and not (self._worker and self._worker.isRunning())
+            and has_selection
+        )
+        # Muda estilo entre Ghost (sem seleção) e Danger (com seleção)
+        target = "Danger" if has_selection else "Ghost"
+        if self.btn_remove.objectName() != target:
+            self.btn_remove.setObjectName(target)
+            style = self.btn_remove.style()
+            if style:
+                style.unpolish(self.btn_remove)
+                style.polish(self.btn_remove)
+            self.btn_remove.update()
+        self.btn_open.setEnabled(
+            any(r.status is Status.DONE for r in self._reports.values())
+            or self._out_dir is not None
+        )
         self.stack.setCurrentWidget(self.table if has_files else self.drop_area)
 
     def _clear(self) -> None:
